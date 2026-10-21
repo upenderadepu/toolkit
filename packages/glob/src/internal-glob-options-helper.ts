@@ -1,5 +1,5 @@
 import * as core from '@actions/core'
-import {GlobOptions} from './internal-glob-options'
+import {GlobOptions} from './internal-glob-options.js'
 
 /**
  * Returns a copy with defaults filled in.
@@ -8,7 +8,9 @@ export function getOptions(copy?: GlobOptions): GlobOptions {
   const result: GlobOptions = {
     followSymbolicLinks: true,
     implicitDescendants: true,
-    omitBrokenSymbolicLinks: true
+    matchDirectories: true,
+    omitBrokenSymbolicLinks: true,
+    excludeHiddenFiles: false
   }
 
   if (copy) {
@@ -22,9 +24,19 @@ export function getOptions(copy?: GlobOptions): GlobOptions {
       core.debug(`implicitDescendants '${result.implicitDescendants}'`)
     }
 
+    if (typeof copy.matchDirectories === 'boolean') {
+      result.matchDirectories = copy.matchDirectories
+      core.debug(`matchDirectories '${result.matchDirectories}'`)
+    }
+
     if (typeof copy.omitBrokenSymbolicLinks === 'boolean') {
       result.omitBrokenSymbolicLinks = copy.omitBrokenSymbolicLinks
       core.debug(`omitBrokenSymbolicLinks '${result.omitBrokenSymbolicLinks}'`)
+    }
+
+    if (typeof copy.excludeHiddenFiles === 'boolean') {
+      result.excludeHiddenFiles = copy.excludeHiddenFiles
+      core.debug(`excludeHiddenFiles '${result.excludeHiddenFiles}'`)
     }
   }
 

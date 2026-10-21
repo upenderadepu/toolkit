@@ -1,7 +1,6 @@
 import * as path from 'path'
-import {Context} from '../src/context'
-
-/* eslint-disable @typescript-eslint/no-require-imports */
+import {readFileSync} from 'fs'
+import {Context} from '../src/context.js'
 
 describe('@actions/context', () => {
   let context: Context
@@ -13,7 +12,10 @@ describe('@actions/context', () => {
   })
 
   it('returns the payload object', () => {
-    expect(context.payload).toEqual(require('./payload.json'))
+    const payload = JSON.parse(
+      readFileSync(path.join(__dirname, 'payload.json'), 'utf8')
+    )
+    expect(context.payload).toEqual(payload)
   })
 
   it('returns an empty payload if the GITHUB_EVENT_PATH environment variable is falsey', () => {
@@ -75,6 +77,44 @@ describe('@actions/context', () => {
       number: 2,
       owner: 'user',
       repo: 'test'
+    })
+  })
+
+  describe('refs', () => {
+    const ORIGINAL_ENV = {...process.env}
+
+    beforeEach(() => {
+      process.env = {...ORIGINAL_ENV}
+    })
+
+    afterAll(() => {
+      process.env = ORIGINAL_ENV
+    })
+
+    it.each([
+      'refs/heads/main',
+      'refs/heads/feature-branch',
+      'refs/pull/42/merge',
+      'refs/tags/v2.0.4'
+    ])(`should set context.ref: %s`, ref => {
+      process.env.GITHUB_REF = ref
+
+      expect(new Context()).toHaveProperty(`ref`, ref)
+    })
+
+    it.each([`meh-${Date.now()}`, 'catpants', 'v1.2.3'])(
+      'should set context.refName: %s',
+      refName => {
+        process.env.GITHUB_REF_NAME = refName
+
+        expect(new Context()).toHaveProperty('refName', refName)
+      }
+    )
+
+    it.each(['branch', 'tag'])('should set context.refType: %s', refType => {
+      process.env.GITHUB_REF_TYPE = refType
+
+      expect(new Context()).toHaveProperty('refType', refType)
     })
   })
 })

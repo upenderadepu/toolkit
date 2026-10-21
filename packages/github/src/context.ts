@@ -1,5 +1,5 @@
 // Originally pulled from https://github.com/JasonEtco/actions-toolkit/blob/main/src/context.ts
-import {WebhookPayload} from './interfaces'
+import {WebhookPayload} from './interfaces.js'
 import {readFileSync, existsSync} from 'fs'
 import {EOL} from 'os'
 
@@ -12,12 +12,18 @@ export class Context {
   eventName: string
   sha: string
   ref: string
+  refName: string
+  refType: string
   workflow: string
   action: string
   actor: string
   job: string
+  runAttempt: number
   runNumber: number
   runId: number
+  apiUrl: string
+  serverUrl: string
+  graphqlUrl: string
 
   /**
    * Hydrate the context from the environment
@@ -37,12 +43,19 @@ export class Context {
     this.eventName = process.env.GITHUB_EVENT_NAME as string
     this.sha = process.env.GITHUB_SHA as string
     this.ref = process.env.GITHUB_REF as string
+    this.refName = process.env.GITHUB_REF_NAME as string
+    this.refType = process.env.GITHUB_REF_TYPE as string
     this.workflow = process.env.GITHUB_WORKFLOW as string
     this.action = process.env.GITHUB_ACTION as string
     this.actor = process.env.GITHUB_ACTOR as string
     this.job = process.env.GITHUB_JOB as string
+    this.runAttempt = parseInt(process.env.GITHUB_RUN_ATTEMPT as string, 10)
     this.runNumber = parseInt(process.env.GITHUB_RUN_NUMBER as string, 10)
     this.runId = parseInt(process.env.GITHUB_RUN_ID as string, 10)
+    this.apiUrl = process.env.GITHUB_API_URL ?? `https://api.github.com`
+    this.serverUrl = process.env.GITHUB_SERVER_URL ?? `https://github.com`
+    this.graphqlUrl =
+      process.env.GITHUB_GRAPHQL_URL ?? `https://api.github.com/graphql`
   }
 
   get issue(): {owner: string; repo: string; number: number} {

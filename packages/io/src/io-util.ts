@@ -1,4 +1,3 @@
-import {ok} from 'assert'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -7,16 +6,44 @@ export const {
   copyFile,
   lstat,
   mkdir,
+  open,
   readdir,
-  readlink,
   rename,
+  rm,
   rmdir,
   stat,
   symlink,
   unlink
 } = fs.promises
-
+// export const {open} = 'fs'
 export const IS_WINDOWS = process.platform === 'win32'
+
+/**
+ * Custom implementation of readlink to ensure Windows junctions
+ * maintain trailing backslash for backward compatibility with Node.js < 24
+ *
+ * In Node.js 20, Windows junctions (directory symlinks) always returned paths
+ * with trailing backslashes. Node.js 24 removed this behavior, which breaks
+ * code that relied on this format for path operations.
+ *
+ * This implementation restores the Node 20 behavior by adding a trailing
+ * backslash to all junction results on Windows.
+ */
+export async function readlink(fsPath: string): Promise<string> {
+  const result = await fs.promises.readlink(fsPath)
+
+  // On Windows, restore Node 20 behavior: add trailing backslash to all results
+  // since junctions on Windows are always directory links
+  if (IS_WINDOWS && !result.endsWith('\\')) {
+    return `${result}\\`
+  }
+
+  return result
+}
+
+// See https://github.com/nodejs/node/blob/d0153aee367422d0858105abec186da4dff0a0c5/deps/uv/include/uv/win.h#L691
+export const UV_FS_O_EXLOCK = 0x10000000
+export const READONLY = fs.constants.O_RDONLY
 
 export async function exists(fsPath: string): Promise<boolean> {
   try {
@@ -34,7 +61,7 @@ export async function exists(fsPath: string): Promise<boolean> {
 
 export async function isDirectory(
   fsPath: string,
-  useStat: boolean = false
+  useStat = false
 ): Promise<boolean> {
   const stats = useStat ? await stat(fsPath) : await lstat(fsPath)
   return stats.isDirectory()
@@ -57,52 +84,6 @@ export function isRooted(p: string): boolean {
   }
 
   return p.startsWith('/')
-}
-
-/**
- * Recursively create a directory at `fsPath`.
- *
- * This implementation is optimistic, meaning it attempts to create the full
- * path first, and backs up the path stack from there.
- *
- * @param fsPath The path to create
- * @param maxDepth The maximum recursion depth
- * @param depth The current recursion depth
- */
-export async function mkdirP(
-  fsPath: string,
-  maxDepth: number = 1000,
-  depth: number = 1
-): Promise<void> {
-  ok(fsPath, 'a path argument must be provided')
-
-  fsPath = path.resolve(fsPath)
-
-  if (depth >= maxDepth) return mkdir(fsPath)
-
-  try {
-    await mkdir(fsPath)
-    return
-  } catch (err) {
-    switch (err.code) {
-      case 'ENOENT': {
-        await mkdirP(path.dirname(fsPath), maxDepth, depth + 1)
-        await mkdir(fsPath)
-        return
-      }
-      default: {
-        let stats: fs.Stats
-
-        try {
-          stats = await stat(fsPath)
-        } catch (err2) {
-          throw err
-        }
-
-        if (!stats.isDirectory()) throw err
-      }
-    }
-  }
 }
 
 /**
@@ -209,7 +190,16 @@ function normalizeSeparators(p: string): string {
 function isUnixExecutable(stats: fs.Stats): boolean {
   return (
     (stats.mode & 1) > 0 ||
-    ((stats.mode & 8) > 0 && stats.gid === process.getgid()) ||
-    ((stats.mode & 64) > 0 && stats.uid === process.getuid())
+    ((stats.mode & 8) > 0 &&
+      process.getgid !== undefined &&
+      stats.gid === process.getgid()) ||
+    ((stats.mode & 64) > 0 &&
+      process.getuid !== undefined &&
+      stats.uid === process.getuid())
   )
+}
+
+// Get the path of cmd.exe in windows
+export function getCmdPath(): string {
+  return process.env['COMSPEC'] ?? `cmd.exe`
 }

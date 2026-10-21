@@ -1,5 +1,5 @@
 import * as http from 'http'
-import proxy from 'proxy'
+import {createProxy} from 'proxy'
 import {getOctokit} from '../src/github'
 import {GitHub, getOctokitOptions} from '../src/utils'
 
@@ -12,13 +12,13 @@ describe('@actions/github', () => {
 
   beforeAll(async () => {
     // Start proxy server
-    proxyServer = proxy()
-    await new Promise(resolve => {
+    proxyServer = createProxy()
+    await new Promise<void>(resolve => {
       const port = Number(proxyUrl.split(':')[2])
       proxyServer.listen(port, () => resolve())
     })
     proxyServer.on('connect', req => {
-      proxyConnects.push(req.url)
+      proxyConnects.push(req.url ?? '')
     })
   })
 
@@ -29,7 +29,7 @@ describe('@actions/github', () => {
 
   afterAll(async () => {
     // Stop proxy server
-    await new Promise(resolve => {
+    await new Promise<void>(resolve => {
       proxyServer.once('close', () => resolve())
       proxyServer.close()
     })
@@ -45,7 +45,7 @@ describe('@actions/github', () => {
       return
     }
     const octokit = new GitHub(getOctokitOptions(token))
-    const branch = await octokit.repos.getBranch({
+    const branch = await octokit.rest.repos.getBranch({
       owner: 'actions',
       repo: 'toolkit',
       branch: 'main'
@@ -60,7 +60,7 @@ describe('@actions/github', () => {
       return
     }
     const octokit = getOctokit(token)
-    const branch = await octokit.repos.getBranch({
+    const branch = await octokit.rest.repos.getBranch({
       owner: 'actions',
       repo: 'toolkit',
       branch: 'main'
@@ -77,7 +77,7 @@ describe('@actions/github', () => {
 
     // Valid token
     let octokit = new GitHub({auth: `token ${token}`})
-    const branch = await octokit.repos.getBranch({
+    const branch = await octokit.rest.repos.getBranch({
       owner: 'actions',
       repo: 'toolkit',
       branch: 'main'
@@ -89,7 +89,7 @@ describe('@actions/github', () => {
     octokit = new GitHub({auth: `token asdf`})
     let failed = false
     try {
-      await octokit.repos.getBranch({
+      await octokit.rest.repos.getBranch({
         owner: 'actions',
         repo: 'toolkit',
         branch: 'main'

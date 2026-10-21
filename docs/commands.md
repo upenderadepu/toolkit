@@ -50,14 +50,25 @@ function setSecret(secret: string): void {}
 
 Now, future logs containing BAR will be masked. E.g. running `echo "Hello FOO BAR World"` will now print `Hello FOO **** World`.
 
-**WARNING** The add-mask and setSecret  commands only support single line secrets. To register a multiline secrets you must register each line individually otherwise it will not be masked.
+**WARNING** The add-mask and setSecret commands only support single-line
+secrets or multi-line secrets that have been escaped. `@actions/core`
+`setSecret` will escape the string you provide by default. When an escaped
+multi-line string is provided the whole string and each of its lines
+individually will be masked. For example you can mask `first\nsecond\r\nthird`
+using:
+
+```sh
+echo "::add-mask::first%0Asecond%0D%0Athird"
+```
+
+This will mask `first%0Asecond%0D%0Athird`, `first`, `second` and `third`.
 
 **WARNING** Do **not** mask short values if you can avoid it, it could render your output unreadable (and future steps' output as well).
 For example, if you mask the letter `l`, running `echo "Hello FOO BAR World"` will now print `He*********o FOO BAR Wor****d`
 
 ### Group and Ungroup Log Lines
 
-Emitting a group with a title will instruct the logs to create a collapsable region up to the next ungroup command.
+Emitting a group with a title will instruct the logs to create a collapsible region up to the next endgroup command.
 
 ```bash
 echo "::group::my title"   
@@ -72,6 +83,7 @@ function endGroup(): void {}
 ```
 
 ### Problem Matchers
+
 Problems matchers can be used to scan a build's output to automatically surface lines to the user that matches the provided pattern. A file path to a .json Problem Matcher must be provided. See [Problem Matchers](problem-matchers.md) for more information on how to define a Problem Matcher.
 
 ```bash
@@ -81,6 +93,7 @@ echo "::remove-matcher owner=eslint-compact::"
 
 `add-matcher` takes a path to a Problem Matcher file
 `remove-matcher` removes a Problem Matcher by owner
+
 ### Save State
 
 Save a state to an environmental variable that can later be used in the main or post action.
@@ -98,10 +111,14 @@ There are several commands to emit different levels of log output:
 | log level | example usage |
 |---|---|
 | [debug](action-debugging.md)  | `echo "::debug::My debug message"` |
+| notice | `echo "::notice::My notice message"` |
 | warning | `echo "::warning::My warning message"` |
 | error | `echo "::error::My error message"` |
 
+Additional syntax options are described at [the workflow command documentation](https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions#setting-a-debug-message).
+
 ### Command Echoing
+
 By default, the echoing of commands to stdout only occurs if [Step Debugging is enabled](./action-debugging.md#How-to-Access-Step-Debug-Logs)
 
 You can enable or disable this for the current step by using the `echo` command.
@@ -127,12 +144,12 @@ The `add-mask`, `debug`, `warning` and `error` commands do not support echoing.
 ### Command Prompt
 
 CMD processes the `"` character differently from other shells when echoing. In CMD, the above snippets should have the `"` characters removed in order to correctly process. For example, the set output command would be:
+
 ```cmd
 echo ::set-output name=FOO::BAR
 ```
 
-
-# Environment files
+## Environment files
 
 During the execution of a workflow, the runner generates temporary files that can be used to perform certain actions. The path to these files are exposed via environment variables. You will need to use the `utf-8` encoding when writing to these files to ensure proper processing of the commands. Multiple commands can be written to the same file, separated by newlines.
 
@@ -146,7 +163,8 @@ echo "FOO=BAR" >> $GITHUB_ENV
 
 Running `$FOO` in a future step will now return `BAR`
 
-For multiline strings, you may use a heredoc style syntax with your choice of delimeter. In the below example, we use `EOF` 
+For multiline strings, you may use a heredoc style syntax with your choice of delimeter. In the below example, we use `EOF`.
+
 ```
 steps:
   - name: Set the value
@@ -160,6 +178,7 @@ steps:
 This would set the value of the `JSON_RESPONSE` env variable to the value of the curl response.
 
 The expected syntax for the heredoc style is:
+
 ```
 {VARIABLE_NAME}<<{DELIMETER}
 {VARIABLE_VALUE}
@@ -183,13 +202,36 @@ echo "/Users/test/.nvm/versions/node/v12.18.3/bin" >> $GITHUB_PATH
 Running `$PATH` in a future step will now return `/Users/test/.nvm/versions/node/v12.18.3/bin:{Previous Path}`;
 
 This is wrapped by the core addPath method:
+
 ```javascript
 export function addPath(inputPath: string): void {}
+```
+
+### Declare an artifact
+
+To declare an artifact that a step produced, write to the file located at `GITHUB_ARTIFACTS` or use the equivalent `actions/core` function. Each line declares one artifact, which is either a path to a local file or an OCI subject reference that includes a digest.
+
+```sh
+echo "dist/app.tar.gz" >> $GITHUB_ARTIFACTS
+echo "ghcr.io/octocat/app:1.0.0@sha256:<hex>" >> $GITHUB_ARTIFACTS
+```
+
+The runner resolves relative file paths against `GITHUB_WORKSPACE` and ignores blank lines and lines that start with `#`. To force how the runner interprets a line, prefix it with `file://` or `oci://`. The runner fails the step if a declaration is invalid, for example, if the file doesn't exist.
+
+The runner identifies each artifact by name: a file's basename, such as `app.tar.gz` for `dist/app.tar.gz`, or an OCI reference without its digest, such as `ghcr.io/octocat/app:1.0.0`. Within a job, declarations that share a name must also share a digest — declaring `linux/app.tgz` and `darwin/app.tgz` with different contents fails the step that declares the second one. Each step can write up to 1 MiB to `GITHUB_ARTIFACTS`, and a job can declare up to 500 unique artifacts. Exceeding either limit fails the step.
+
+`GITHUB_ARTIFACTS` is set in runner version 2.336.0 and later, but the runner processes it only where artifact declarations are enabled. Otherwise, the runner ignores the file without validating its contents or failing the step.
+
+This is wrapped by the core `declareArtifact` method:
+
+```javascript
+export function declareArtifact(artifact: string): void {}
 ```
 
 ### Powershell
 
 Powershell does not use UTF8 by default. You will want to make sure you write in the correct encoding. For example, to set the path:
+
 ```
 steps:
   - run: echo "mypath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append

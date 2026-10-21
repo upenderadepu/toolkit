@@ -1,12 +1,12 @@
 import * as core from '@actions/core'
 import * as fs from 'fs'
-import * as globOptionsHelper from './internal-glob-options-helper'
+import * as globOptionsHelper from './internal-glob-options-helper.js'
 import * as path from 'path'
-import * as patternHelper from './internal-pattern-helper'
-import {GlobOptions} from './internal-glob-options'
-import {MatchKind} from './internal-match-kind'
-import {Pattern} from './internal-pattern'
-import {SearchState} from './internal-search-state'
+import * as patternHelper from './internal-pattern-helper.js'
+import {GlobOptions} from './internal-glob-options.js'
+import {MatchKind} from './internal-match-kind.js'
+import {Pattern} from './internal-pattern.js'
+import {SearchState} from './internal-search-state.js'
 
 const IS_WINDOWS = process.platform === 'win32'
 
@@ -66,7 +66,6 @@ export class DefaultGlobber implements Globber {
   async *globGenerator(): AsyncGenerator<string, void> {
     // Fill in defaults options
     const options = globOptionsHelper.getOptions(this.options)
-
     // Implicit descendants?
     const patterns: Pattern[] = []
     for (const pattern of this.patterns) {
@@ -77,12 +76,13 @@ export class DefaultGlobber implements Globber {
           pattern.segments[pattern.segments.length - 1] !== '**')
       ) {
         patterns.push(
-          new Pattern(pattern.negate, pattern.segments.concat('**'))
+          new Pattern(pattern.negate, true, pattern.segments.concat('**'))
         )
       }
     }
 
     // Push the search paths
+
     const stack: SearchState[] = []
     for (const searchPath of patternHelper.getSearchPaths(patterns)) {
       core.debug(`Search path '${searchPath}'`)
@@ -128,10 +128,15 @@ export class DefaultGlobber implements Globber {
         continue
       }
 
+      // Hidden file or directory?
+      if (options.excludeHiddenFiles && path.basename(item.path).match(/^\./)) {
+        continue
+      }
+
       // Directory
       if (stats.isDirectory()) {
         // Matched
-        if (match & MatchKind.Directory) {
+        if (match & MatchKind.Directory && options.matchDirectories) {
           yield item.path
         }
         // Descend?
@@ -180,6 +185,7 @@ export class DefaultGlobber implements Globber {
     }
 
     result.searchPaths.push(...patternHelper.getSearchPaths(result.patterns))
+
     return result
   }
 

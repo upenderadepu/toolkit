@@ -5,8 +5,19 @@
     "strict": true,
     "declaration": true,
     "target": "es6",
+    "skipLibCheck": true,
     "sourceMap": true,
-    "lib": ["es6"]
+    "noImplicitAny": false,
+    "baseUrl": "./",
+    "paths": {
+      "@actions/core": [
+        "packages/core"
+      ],
+      "@actions/http-client": [
+        "packages/http-client"
+      ],
+    },
+    "useUnknownInCatchVariables": false
   },
   "exclude": [
     "node_modules",

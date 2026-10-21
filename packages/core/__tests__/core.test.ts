@@ -1,7 +1,9 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import * as core from '../src/core'
+import * as core from '../src/core.js'
+import {HttpClient} from '@actions/http-client'
+import {toCommandProperties} from '../src/utils.js'
 
 /* eslint-disable @typescript-eslint/unbound-method */
 
@@ -19,20 +21,49 @@ const testEnvVars = {
   INPUT_MISSING: '',
   'INPUT_SPECIAL_CHARS_\'\t"\\': '\'\t"\\ response ',
   INPUT_MULTIPLE_SPACES_VARIABLE: 'I have multiple spaces',
+  INPUT_BOOLEAN_INPUT: 'true',
+  INPUT_BOOLEAN_INPUT_TRUE1: 'true',
+  INPUT_BOOLEAN_INPUT_TRUE2: 'True',
+  INPUT_BOOLEAN_INPUT_TRUE3: 'TRUE',
+  INPUT_BOOLEAN_INPUT_FALSE1: 'false',
+  INPUT_BOOLEAN_INPUT_FALSE2: 'False',
+  INPUT_BOOLEAN_INPUT_FALSE3: 'FALSE',
+  INPUT_WRONG_BOOLEAN_INPUT: 'wrong',
+  INPUT_WITH_TRAILING_WHITESPACE: '  some val  ',
+  INPUT_MY_INPUT_LIST: 'val1\nval2\nval3',
+  INPUT_LIST_WITH_TRAILING_WHITESPACE: '  val1  \n  val2  \n  ',
 
   // Save inputs
   STATE_TEST_1: 'state_val',
 
   // File Commands
   GITHUB_PATH: '',
-  GITHUB_ENV: ''
+  GITHUB_ENV: '',
+  GITHUB_OUTPUT: '',
+  GITHUB_STATE: '',
+  GITHUB_ARTIFACTS: ''
 }
+
+const UUID = '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d'
+const DELIMITER = `ghadelimiter_${UUID}`
+
+jest.mock('crypto', () => ({
+  ...jest.requireActual('crypto'),
+  randomUUID: jest.fn(() => UUID)
+}))
+
+const TEMP_DIR = path.join(__dirname, '_temp')
 
 describe('@actions/core', () => {
   beforeAll(() => {
-    const filePath = path.join(__dirname, `test`)
+    const filePath = TEMP_DIR
     if (!fs.existsSync(filePath)) {
       fs.mkdirSync(filePath)
+    } else {
+      // Clear out the temp directory
+      for (const file of fs.readdirSync(filePath)) {
+        fs.unlinkSync(path.join(filePath, file))
+      }
     }
   })
 
@@ -41,6 +72,10 @@ describe('@actions/core', () => {
       process.env[key] = testEnvVars[key as keyof typeof testEnvVars]
     }
     process.stdout.write = jest.fn()
+  })
+
+  afterEach(() => {
+    jest.restoreAllMocks()
   })
 
   it('legacy exportVariable produces the correct command and sets the env', () => {
@@ -78,7 +113,7 @@ describe('@actions/core', () => {
     core.exportVariable('my var', 'var val')
     verifyFileCommand(
       command,
-      `my var<<_GitHubActionsFileCommandDelimeter_${os.EOL}var val${os.EOL}_GitHubActionsFileCommandDelimeter_${os.EOL}`
+      `my var<<${DELIMITER}${os.EOL}var val${os.EOL}${DELIMITER}${os.EOL}`
     )
   })
 
@@ -88,7 +123,7 @@ describe('@actions/core', () => {
     core.exportVariable('my var', true)
     verifyFileCommand(
       command,
-      `my var<<_GitHubActionsFileCommandDelimeter_${os.EOL}true${os.EOL}_GitHubActionsFileCommandDelimeter_${os.EOL}`
+      `my var<<${DELIMITER}${os.EOL}true${os.EOL}${DELIMITER}${os.EOL}`
     )
   })
 
@@ -98,13 +133,45 @@ describe('@actions/core', () => {
     core.exportVariable('my var', 5)
     verifyFileCommand(
       command,
-      `my var<<_GitHubActionsFileCommandDelimeter_${os.EOL}5${os.EOL}_GitHubActionsFileCommandDelimeter_${os.EOL}`
+      `my var<<${DELIMITER}${os.EOL}5${os.EOL}${DELIMITER}${os.EOL}`
     )
+  })
+
+  it('exportVariable does not allow delimiter as value', () => {
+    const command = 'ENV'
+    createFileCommandFile(command)
+
+    expect(() => {
+      core.exportVariable('my var', `good stuff ${DELIMITER} bad stuff`)
+    }).toThrow(
+      `Unexpected input: value should not contain the delimiter "${DELIMITER}"`
+    )
+
+    const filePath = path.join(TEMP_DIR, command)
+    fs.unlinkSync(filePath)
+  })
+
+  it('exportVariable does not allow delimiter as name', () => {
+    const command = 'ENV'
+    createFileCommandFile(command)
+
+    expect(() => {
+      core.exportVariable(`good stuff ${DELIMITER} bad stuff`, 'test')
+    }).toThrow(
+      `Unexpected input: name should not contain the delimiter "${DELIMITER}"`
+    )
+
+    const filePath = path.join(TEMP_DIR, command)
+    fs.unlinkSync(filePath)
   })
 
   it('setSecret produces the correct command', () => {
     core.setSecret('secret val')
-    assertWriteCalls([`::add-mask::secret val${os.EOL}`])
+    core.setSecret('multi\nline\r\nsecret')
+    assertWriteCalls([
+      `::add-mask::secret val${os.EOL}`,
+      `::add-mask::multi%0Aline%0D%0Asecret${os.EOL}`
+    ])
   })
 
   it('prependPath produces the correct commands and sets the env', () => {
@@ -157,19 +224,151 @@ describe('@actions/core', () => {
     )
   })
 
-  it('setOutput produces the correct command', () => {
+  it('getInput trims whitespace by default', () => {
+    expect(core.getInput('with trailing whitespace')).toBe('some val')
+  })
+
+  it('getInput trims whitespace when option is explicitly true', () => {
+    expect(
+      core.getInput('with trailing whitespace', {trimWhitespace: true})
+    ).toBe('some val')
+  })
+
+  it('getInput does not trim whitespace when option is false', () => {
+    expect(
+      core.getInput('with trailing whitespace', {trimWhitespace: false})
+    ).toBe('  some val  ')
+  })
+
+  it('getInput gets non-required boolean input', () => {
+    expect(core.getBooleanInput('boolean input')).toBe(true)
+  })
+
+  it('getInput gets required input', () => {
+    expect(core.getBooleanInput('boolean input', {required: true})).toBe(true)
+  })
+
+  it('getBooleanInput handles boolean input', () => {
+    expect(core.getBooleanInput('boolean input true1')).toBe(true)
+    expect(core.getBooleanInput('boolean input true2')).toBe(true)
+    expect(core.getBooleanInput('boolean input true3')).toBe(true)
+    expect(core.getBooleanInput('boolean input false1')).toBe(false)
+    expect(core.getBooleanInput('boolean input false2')).toBe(false)
+    expect(core.getBooleanInput('boolean input false3')).toBe(false)
+  })
+
+  it('getBooleanInput handles wrong boolean input', () => {
+    expect(() => core.getBooleanInput('wrong boolean input')).toThrow(
+      'Input does not meet YAML 1.2 "Core Schema" specification: wrong boolean input\n' +
+        `Support boolean input list: \`true | True | TRUE | false | False | FALSE\``
+    )
+  })
+
+  it('getMultilineInput works', () => {
+    expect(core.getMultilineInput('my input list')).toEqual([
+      'val1',
+      'val2',
+      'val3'
+    ])
+  })
+
+  it('getMultilineInput trims whitespace by default', () => {
+    expect(core.getMultilineInput('list with trailing whitespace')).toEqual([
+      'val1',
+      'val2'
+    ])
+  })
+
+  it('getMultilineInput trims whitespace when option is explicitly true', () => {
+    expect(
+      core.getMultilineInput('list with trailing whitespace', {
+        trimWhitespace: true
+      })
+    ).toEqual(['val1', 'val2'])
+  })
+
+  it('getMultilineInput does not trim whitespace when option is false', () => {
+    expect(
+      core.getMultilineInput('list with trailing whitespace', {
+        trimWhitespace: false
+      })
+    ).toEqual(['  val1  ', '  val2  ', '  '])
+  })
+
+  it('legacy setOutput produces the correct command', () => {
     core.setOutput('some output', 'some value')
-    assertWriteCalls([`::set-output name=some output::some value${os.EOL}`])
+    assertWriteCalls([
+      os.EOL,
+      `::set-output name=some output::some value${os.EOL}`
+    ])
   })
 
-  it('setOutput handles bools', () => {
+  it('legacy setOutput handles bools', () => {
     core.setOutput('some output', false)
-    assertWriteCalls([`::set-output name=some output::false${os.EOL}`])
+    assertWriteCalls([os.EOL, `::set-output name=some output::false${os.EOL}`])
   })
 
-  it('setOutput handles numbers', () => {
+  it('legacy setOutput handles numbers', () => {
     core.setOutput('some output', 1.01)
-    assertWriteCalls([`::set-output name=some output::1.01${os.EOL}`])
+    assertWriteCalls([os.EOL, `::set-output name=some output::1.01${os.EOL}`])
+  })
+
+  it('setOutput produces the correct command and sets the output', () => {
+    const command = 'OUTPUT'
+    createFileCommandFile(command)
+    core.setOutput('my out', 'out val')
+    verifyFileCommand(
+      command,
+      `my out<<${DELIMITER}${os.EOL}out val${os.EOL}${DELIMITER}${os.EOL}`
+    )
+  })
+
+  it('setOutput handles boolean inputs', () => {
+    const command = 'OUTPUT'
+    createFileCommandFile(command)
+    core.setOutput('my out', true)
+    verifyFileCommand(
+      command,
+      `my out<<${DELIMITER}${os.EOL}true${os.EOL}${DELIMITER}${os.EOL}`
+    )
+  })
+
+  it('setOutput handles number inputs', () => {
+    const command = 'OUTPUT'
+    createFileCommandFile(command)
+    core.setOutput('my out', 5)
+    verifyFileCommand(
+      command,
+      `my out<<${DELIMITER}${os.EOL}5${os.EOL}${DELIMITER}${os.EOL}`
+    )
+  })
+
+  it('setOutput does not allow delimiter as value', () => {
+    const command = 'OUTPUT'
+    createFileCommandFile(command)
+
+    expect(() => {
+      core.setOutput('my out', `good stuff ${DELIMITER} bad stuff`)
+    }).toThrow(
+      `Unexpected input: value should not contain the delimiter "${DELIMITER}"`
+    )
+
+    const filePath = path.join(TEMP_DIR, command)
+    fs.unlinkSync(filePath)
+  })
+
+  it('setOutput does not allow delimiter as name', () => {
+    const command = 'OUTPUT'
+    createFileCommandFile(command)
+
+    expect(() => {
+      core.setOutput(`good stuff ${DELIMITER} bad stuff`, 'test')
+    }).toThrow(
+      `Unexpected input: name should not contain the delimiter "${DELIMITER}"`
+    )
+
+    const filePath = path.join(TEMP_DIR, command)
+    fs.unlinkSync(filePath)
   })
 
   it('setFailed sets the correct exit code and failure message', () => {
@@ -207,6 +406,21 @@ describe('@actions/core', () => {
     assertWriteCalls([`::error::Error: ${message}${os.EOL}`])
   })
 
+  it('error handles parameters correctly', () => {
+    const message = 'this is my error message'
+    core.error(new Error(message), {
+      title: 'A title',
+      file: 'root/test.txt',
+      startColumn: 1,
+      endColumn: 2,
+      startLine: 5,
+      endLine: 5
+    })
+    assertWriteCalls([
+      `::error title=A title,file=root/test.txt,line=5,endLine=5,col=1,endColumn=2::Error: ${message}${os.EOL}`
+    ])
+  })
+
   it('warning sets the correct message', () => {
     core.warning('Warning')
     assertWriteCalls([`::warning::Warning${os.EOL}`])
@@ -221,6 +435,72 @@ describe('@actions/core', () => {
     const message = 'this is my error message'
     core.warning(new Error(message))
     assertWriteCalls([`::warning::Error: ${message}${os.EOL}`])
+  })
+
+  it('warning handles parameters correctly', () => {
+    const message = 'this is my error message'
+    core.warning(new Error(message), {
+      title: 'A title',
+      file: 'root/test.txt',
+      startColumn: 1,
+      endColumn: 2,
+      startLine: 5,
+      endLine: 5
+    })
+    assertWriteCalls([
+      `::warning title=A title,file=root/test.txt,line=5,endLine=5,col=1,endColumn=2::Error: ${message}${os.EOL}`
+    ])
+  })
+
+  it('notice sets the correct message', () => {
+    core.notice('Notice')
+    assertWriteCalls([`::notice::Notice${os.EOL}`])
+  })
+
+  it('notice escapes the message', () => {
+    core.notice('\r\nnotice\n')
+    assertWriteCalls([`::notice::%0D%0Anotice%0A${os.EOL}`])
+  })
+
+  it('notice handles an error object', () => {
+    const message = 'this is my error message'
+    core.notice(new Error(message))
+    assertWriteCalls([`::notice::Error: ${message}${os.EOL}`])
+  })
+
+  it('notice handles parameters correctly', () => {
+    const message = 'this is my error message'
+    core.notice(new Error(message), {
+      title: 'A title',
+      file: 'root/test.txt',
+      startColumn: 1,
+      endColumn: 2,
+      startLine: 5,
+      endLine: 5
+    })
+    assertWriteCalls([
+      `::notice title=A title,file=root/test.txt,line=5,endLine=5,col=1,endColumn=2::Error: ${message}${os.EOL}`
+    ])
+  })
+
+  it('annotations map field names correctly', () => {
+    const commandProperties = toCommandProperties({
+      title: 'A title',
+      file: 'root/test.txt',
+      startColumn: 1,
+      endColumn: 2,
+      startLine: 5,
+      endLine: 5
+    })
+    expect(commandProperties.title).toBe('A title')
+    expect(commandProperties.file).toBe('root/test.txt')
+    expect(commandProperties.col).toBe(1)
+    expect(commandProperties.endColumn).toBe(2)
+    expect(commandProperties.line).toBe(5)
+    expect(commandProperties.endLine).toBe(5)
+
+    expect(commandProperties.startColumn).toBeUndefined()
+    expect(commandProperties.startLine).toBeUndefined()
   })
 
   it('startGroup starts a new group', () => {
@@ -256,19 +536,77 @@ describe('@actions/core', () => {
     assertWriteCalls([`::debug::%0D%0Adebug%0A${os.EOL}`])
   })
 
-  it('saveState produces the correct command', () => {
+  it('legacy saveState produces the correct command', () => {
     core.saveState('state_1', 'some value')
     assertWriteCalls([`::save-state name=state_1::some value${os.EOL}`])
   })
 
-  it('saveState handles numbers', () => {
+  it('legacy saveState handles numbers', () => {
     core.saveState('state_1', 1)
     assertWriteCalls([`::save-state name=state_1::1${os.EOL}`])
   })
 
-  it('saveState handles bools', () => {
+  it('legacy saveState handles bools', () => {
     core.saveState('state_1', true)
     assertWriteCalls([`::save-state name=state_1::true${os.EOL}`])
+  })
+
+  it('saveState produces the correct command and saves the state', () => {
+    const command = 'STATE'
+    createFileCommandFile(command)
+    core.saveState('my state', 'out val')
+    verifyFileCommand(
+      command,
+      `my state<<${DELIMITER}${os.EOL}out val${os.EOL}${DELIMITER}${os.EOL}`
+    )
+  })
+
+  it('saveState handles boolean inputs', () => {
+    const command = 'STATE'
+    createFileCommandFile(command)
+    core.saveState('my state', true)
+    verifyFileCommand(
+      command,
+      `my state<<${DELIMITER}${os.EOL}true${os.EOL}${DELIMITER}${os.EOL}`
+    )
+  })
+
+  it('saveState handles number inputs', () => {
+    const command = 'STATE'
+    createFileCommandFile(command)
+    core.saveState('my state', 5)
+    verifyFileCommand(
+      command,
+      `my state<<${DELIMITER}${os.EOL}5${os.EOL}${DELIMITER}${os.EOL}`
+    )
+  })
+
+  it('saveState does not allow delimiter as value', () => {
+    const command = 'STATE'
+    createFileCommandFile(command)
+
+    expect(() => {
+      core.saveState('my state', `good stuff ${DELIMITER} bad stuff`)
+    }).toThrow(
+      `Unexpected input: value should not contain the delimiter "${DELIMITER}"`
+    )
+
+    const filePath = path.join(TEMP_DIR, command)
+    fs.unlinkSync(filePath)
+  })
+
+  it('saveState does not allow delimiter as name', () => {
+    const command = 'STATE'
+    createFileCommandFile(command)
+
+    expect(() => {
+      core.saveState(`good stuff ${DELIMITER} bad stuff`, 'test')
+    }).toThrow(
+      `Unexpected input: name should not contain the delimiter "${DELIMITER}"`
+    )
+
+    const filePath = path.join(TEMP_DIR, command)
+    fs.unlinkSync(filePath)
   })
 
   it('getState gets wrapper action state', () => {
@@ -297,6 +635,91 @@ describe('@actions/core', () => {
     core.setCommandEcho(false)
     assertWriteCalls([`::echo::off${os.EOL}`])
   })
+
+  it('declareArtifact writes a file path to the artifacts file', () => {
+    const command = 'ARTIFACTS'
+    createFileCommandFile(command)
+    core.declareArtifact('dist/app.tar.gz')
+    verifyFileCommand(command, `dist/app.tar.gz${os.EOL}`)
+  })
+
+  it('declareArtifact writes an OCI subject to the artifacts file', () => {
+    const command = 'ARTIFACTS'
+    const subject = `ghcr.io/octocat/app:1.0.0@sha256:${'a'.repeat(64)}`
+    createFileCommandFile(command)
+    core.declareArtifact(subject)
+    verifyFileCommand(command, `${subject}${os.EOL}`)
+  })
+
+  it('declareArtifact writes one line per declaration', () => {
+    const command = 'ARTIFACTS'
+    createFileCommandFile(command)
+    core.declareArtifact('dist/app.tar.gz')
+    core.declareArtifact('file://#notes.txt')
+    verifyFileCommand(
+      command,
+      `dist/app.tar.gz${os.EOL}file://#notes.txt${os.EOL}`
+    )
+  })
+
+  it('declareArtifact trims surrounding whitespace', () => {
+    const command = 'ARTIFACTS'
+    createFileCommandFile(command)
+    core.declareArtifact('  dist/app.tar.gz\t')
+    core.declareArtifact(`dist/app.zip${os.EOL}`)
+    verifyFileCommand(command, `dist/app.tar.gz${os.EOL}dist/app.zip${os.EOL}`)
+  })
+
+  it('declareArtifact does not allow empty values', () => {
+    const command = 'ARTIFACTS'
+    createFileCommandFile(command)
+    expect(() => core.declareArtifact('')).toThrow('Artifact must not be empty')
+    expect(() => core.declareArtifact(' \t ')).toThrow(
+      'Artifact must not be empty'
+    )
+    verifyFileCommand(command, '')
+  })
+
+  it('declareArtifact does not allow line breaks', () => {
+    const command = 'ARTIFACTS'
+    createFileCommandFile(command)
+    for (const value of [
+      'dist/a\ndist/b',
+      'dist/a\r\ndist/b',
+      'dist/a\rdist/b'
+    ]) {
+      expect(() => core.declareArtifact(value)).toThrow(
+        `Artifact must not contain line breaks: ${JSON.stringify(value)}`
+      )
+    }
+    verifyFileCommand(command, '')
+  })
+
+  it('declareArtifact does not allow values that would be read as comments', () => {
+    const command = 'ARTIFACTS'
+    createFileCommandFile(command)
+    expect(() => core.declareArtifact('#notes.txt')).toThrow(
+      `Artifact "#notes.txt" would be ignored as a comment. To declare a file whose name starts with '#', prefix the path with 'file://'`
+    )
+    expect(() => core.declareArtifact('  # notes.txt')).toThrow(
+      'would be ignored as a comment'
+    )
+    verifyFileCommand(command, '')
+  })
+
+  it('declareArtifact skips the declaration when GITHUB_ARTIFACTS is not set', () => {
+    core.declareArtifact('dist/app.tar.gz')
+    assertWriteCalls([
+      `::debug::Skipping artifact declaration "dist/app.tar.gz": $GITHUB_ARTIFACTS is not set. Artifact declarations require runner version 2.336.0 or later.${os.EOL}`
+    ])
+  })
+
+  it('declareArtifact validates the value when GITHUB_ARTIFACTS is not set', () => {
+    expect(() => core.declareArtifact('dist/a\ndist/b')).toThrow(
+      'Artifact must not contain line breaks'
+    )
+    expect(process.stdout.write).not.toHaveBeenCalled()
+  })
 })
 
 // Assert that process.stdout.write calls called only with the given arguments.
@@ -309,7 +732,7 @@ function assertWriteCalls(calls: string[]): void {
 }
 
 function createFileCommandFile(command: string): void {
-  const filePath = path.join(__dirname, `test/${command}`)
+  const filePath = path.join(__dirname, `_temp/${command}`)
   process.env[`GITHUB_${command}`] = filePath
   fs.appendFileSync(filePath, '', {
     encoding: 'utf8'
@@ -317,7 +740,7 @@ function createFileCommandFile(command: string): void {
 }
 
 function verifyFileCommand(command: string, expectedContents: string): void {
-  const filePath = path.join(__dirname, `test/${command}`)
+  const filePath = path.join(__dirname, `_temp/${command}`)
   const contents = fs.readFileSync(filePath, 'utf8')
   try {
     expect(contents).toEqual(expectedContents)
@@ -325,3 +748,23 @@ function verifyFileCommand(command: string, expectedContents: string): void {
     fs.unlinkSync(filePath)
   }
 }
+
+function getTokenEndPoint(): string {
+  return 'https://vstoken.actions.githubusercontent.com/.well-known/openid-configuration'
+}
+
+describe('oidc-client-tests', () => {
+  it('Get Http Client', async () => {
+    const http = new HttpClient('actions/oidc-client')
+    expect(http).toBeDefined()
+  })
+
+  it('HTTP get request to get token endpoint', async () => {
+    const http = new HttpClient('actions/oidc-client')
+    const res = await http.get(getTokenEndPoint())
+    expect(res.message.statusCode).toBe(200)
+    // Consume the response to close the socket
+    await res.readBody()
+    res.message.destroy()
+  })
+})

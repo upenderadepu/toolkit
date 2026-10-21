@@ -1,6 +1,7 @@
 import * as http from 'http'
 import * as httpClient from '@actions/http-client'
-import {OctokitOptions} from '@octokit/core/dist-types/types'
+import type {OctokitOptions} from '@octokit/core/types'
+import {ProxyAgent, fetch} from 'undici'
 
 export function getAuthString(
   token: string,
@@ -20,6 +21,38 @@ export function getProxyAgent(destinationUrl: string): http.Agent {
   return hc.getAgent(destinationUrl)
 }
 
+export function getProxyAgentDispatcher(
+  destinationUrl: string
+): ProxyAgent | undefined {
+  const hc = new httpClient.HttpClient()
+  return hc.getAgentDispatcher(destinationUrl)
+}
+
+export function getProxyFetch(destinationUrl): typeof fetch {
+  const httpDispatcher = getProxyAgentDispatcher(destinationUrl)
+  const proxyFetch: typeof fetch = async (url, opts) => {
+    return fetch(url, {
+      ...opts,
+      dispatcher: httpDispatcher
+    })
+  }
+  return proxyFetch
+}
+
 export function getApiBaseUrl(): string {
   return process.env['GITHUB_API_URL'] || 'https://api.github.com'
+}
+
+export function getUserAgentWithOrchestrationId(
+  baseUserAgent?: string
+): string | undefined {
+  const orchId = process.env['ACTIONS_ORCHESTRATION_ID']?.trim()
+  if (orchId) {
+    const sanitizedId = orchId.replace(/[^a-z0-9_.-]/gi, '_')
+    const tag = `actions_orchestration_id/${sanitizedId}`
+    if (baseUserAgent?.includes(tag)) return baseUserAgent
+    const ua = baseUserAgent ? `${baseUserAgent} ` : ''
+    return `${ua}${tag}`
+  }
+  return baseUserAgent
 }

@@ -1,9 +1,11 @@
-import {issue, issueCommand} from './command'
-import {issueCommand as issueFileCommand} from './file-command'
-import {toCommandValue} from './utils'
+import {issue, issueCommand} from './command.js'
+import {issueFileCommand, prepareKeyValueMessage} from './file-command.js'
+import {toCommandProperties, toCommandValue} from './utils.js'
 
 import * as os from 'os'
 import * as path from 'path'
+
+import {OidcClient} from './oidc-utils.js'
 
 /**
  * Interface for getInput options
@@ -11,6 +13,9 @@ import * as path from 'path'
 export interface InputOptions {
   /** Optional. Whether the input is required. If required and not present, will throw. Defaults to false */
   required?: boolean
+
+  /** Optional. Whether leading/trailing whitespace will be trimmed for the input. Defaults to true */
+  trimWhitespace?: boolean
 }
 
 /**
@@ -26,6 +31,43 @@ export enum ExitCode {
    * A code indicating that the action was a failure
    */
   Failure = 1
+}
+
+/**
+ * Optional properties that can be sent with annotation commands (notice, error, and warning)
+ * See: https://docs.github.com/en/rest/reference/checks#create-a-check-run for more information about annotations.
+ */
+export interface AnnotationProperties {
+  /**
+   * A title for the annotation.
+   */
+  title?: string
+
+  /**
+   * The path of the file for which the annotation should be created.
+   */
+  file?: string
+
+  /**
+   * The start line for the annotation.
+   */
+  startLine?: number
+
+  /**
+   * The end line for the annotation. Defaults to `startLine` when `startLine` is provided.
+   */
+  endLine?: number
+
+  /**
+   * The start column for the annotation. Cannot be sent when `startLine` and `endLine` are different values.
+   */
+  startColumn?: number
+
+  /**
+   * The end column for the annotation. Cannot be sent when `startLine` and `endLine` are different values.
+   * Defaults to `startColumn` when `startColumn` is provided.
+   */
+  endColumn?: number
 }
 
 //-----------------------------------------------------------------------
@@ -44,17 +86,40 @@ export function exportVariable(name: string, val: any): void {
 
   const filePath = process.env['GITHUB_ENV'] || ''
   if (filePath) {
-    const delimiter = '_GitHubActionsFileCommandDelimeter_'
-    const commandValue = `${name}<<${delimiter}${os.EOL}${convertedVal}${os.EOL}${delimiter}`
-    issueFileCommand('ENV', commandValue)
-  } else {
-    issueCommand('set-env', {name}, convertedVal)
+    return issueFileCommand('ENV', prepareKeyValueMessage(name, val))
   }
+
+  issueCommand('set-env', {name}, convertedVal)
 }
 
 /**
  * Registers a secret which will get masked from logs
- * @param secret value of the secret
+ *
+ * @param secret - Value of the secret to be masked
+ * @remarks
+ * This function instructs the Actions runner to mask the specified value in any
+ * logs produced during the workflow run. Once registered, the secret value will
+ * be replaced with asterisks (***) whenever it appears in console output, logs,
+ * or error messages.
+ *
+ * This is useful for protecting sensitive information such as:
+ * - API keys
+ * - Access tokens
+ * - Authentication credentials
+ * - URL parameters containing signatures (SAS tokens)
+ *
+ * Note that masking only affects future logs; any previous appearances of the
+ * secret in logs before calling this function will remain unmasked.
+ *
+ * @example
+ * ```typescript
+ * // Register an API token as a secret
+ * const apiToken = "abc123xyz456";
+ * setSecret(apiToken);
+ *
+ * // Now any logs containing this value will show *** instead
+ * console.log(`Using token: ${apiToken}`); // Outputs: "Using token: ***"
+ * ```
  */
 export function setSecret(secret: string): void {
   issueCommand('add-mask', {}, secret)
@@ -75,7 +140,9 @@ export function addPath(inputPath: string): void {
 }
 
 /**
- * Gets the value of an input.  The value is also trimmed.
+ * Gets the value of an input.
+ * Unless trimWhitespace is set to false in InputOptions, the value is also trimmed.
+ * Returns an empty string if the value is not defined.
  *
  * @param     name     name of the input to get
  * @param     options  optional. See InputOptions.
@@ -88,7 +155,56 @@ export function getInput(name: string, options?: InputOptions): string {
     throw new Error(`Input required and not supplied: ${name}`)
   }
 
+  if (options && options.trimWhitespace === false) {
+    return val
+  }
+
   return val.trim()
+}
+
+/**
+ * Gets the values of an multiline input.  Each value is also trimmed.
+ *
+ * @param     name     name of the input to get
+ * @param     options  optional. See InputOptions.
+ * @returns   string[]
+ *
+ */
+export function getMultilineInput(
+  name: string,
+  options?: InputOptions
+): string[] {
+  const inputs: string[] = getInput(name, options)
+    .split('\n')
+    .filter(x => x !== '')
+
+  if (options && options.trimWhitespace === false) {
+    return inputs
+  }
+
+  return inputs.map(input => input.trim())
+}
+
+/**
+ * Gets the input value of the boolean type in the YAML 1.2 "core schema" specification.
+ * Support boolean input list: `true | True | TRUE | false | False | FALSE` .
+ * The return value is also in boolean type.
+ * ref: https://yaml.org/spec/1.2/spec.html#id2804923
+ *
+ * @param     name     name of the input to get
+ * @param     options  optional. See InputOptions.
+ * @returns   boolean
+ */
+export function getBooleanInput(name: string, options?: InputOptions): boolean {
+  const trueValue = ['true', 'True', 'TRUE']
+  const falseValue = ['false', 'False', 'FALSE']
+  const val = getInput(name, options)
+  if (trueValue.includes(val)) return true
+  if (falseValue.includes(val)) return false
+  throw new TypeError(
+    `Input does not meet YAML 1.2 "Core Schema" specification: ${name}\n` +
+      `Support boolean input list: \`true | True | TRUE | false | False | FALSE\``
+  )
 }
 
 /**
@@ -99,7 +215,13 @@ export function getInput(name: string, options?: InputOptions): string {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function setOutput(name: string, value: any): void {
-  issueCommand('set-output', {name}, value)
+  const filePath = process.env['GITHUB_OUTPUT'] || ''
+  if (filePath) {
+    return issueFileCommand('OUTPUT', prepareKeyValueMessage(name, value))
+  }
+
+  process.stdout.write(os.EOL)
+  issueCommand('set-output', {name}, toCommandValue(value))
 }
 
 /**
@@ -148,17 +270,49 @@ export function debug(message: string): void {
 /**
  * Adds an error issue
  * @param message error issue message. Errors will be converted to string via toString()
+ * @param properties optional properties to add to the annotation.
  */
-export function error(message: string | Error): void {
-  issue('error', message instanceof Error ? message.toString() : message)
+export function error(
+  message: string | Error,
+  properties: AnnotationProperties = {}
+): void {
+  issueCommand(
+    'error',
+    toCommandProperties(properties),
+    message instanceof Error ? message.toString() : message
+  )
 }
 
 /**
- * Adds an warning issue
+ * Adds a warning issue
  * @param message warning issue message. Errors will be converted to string via toString()
+ * @param properties optional properties to add to the annotation.
  */
-export function warning(message: string | Error): void {
-  issue('warning', message instanceof Error ? message.toString() : message)
+export function warning(
+  message: string | Error,
+  properties: AnnotationProperties = {}
+): void {
+  issueCommand(
+    'warning',
+    toCommandProperties(properties),
+    message instanceof Error ? message.toString() : message
+  )
+}
+
+/**
+ * Adds a notice issue
+ * @param message notice issue message. Errors will be converted to string via toString()
+ * @param properties optional properties to add to the annotation.
+ */
+export function notice(
+  message: string | Error,
+  properties: AnnotationProperties = {}
+): void {
+  issueCommand(
+    'notice',
+    toCommandProperties(properties),
+    message instanceof Error ? message.toString() : message
+  )
 }
 
 /**
@@ -221,7 +375,12 @@ export async function group<T>(name: string, fn: () => Promise<T>): Promise<T> {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function saveState(name: string, value: any): void {
-  issueCommand('save-state', {name}, value)
+  const filePath = process.env['GITHUB_STATE'] || ''
+  if (filePath) {
+    return issueFileCommand('STATE', prepareKeyValueMessage(name, value))
+  }
+
+  issueCommand('save-state', {name}, toCommandValue(value))
 }
 
 /**
@@ -233,3 +392,83 @@ export function saveState(name: string, value: any): void {
 export function getState(name: string): string {
   return process.env[`STATE_${name}`] || ''
 }
+
+//-----------------------------------------------------------------------
+// Artifacts
+//-----------------------------------------------------------------------
+
+/**
+ * Declares an artifact produced by the current step.
+ *
+ * Each call declares a single artifact, which is either of the following:
+ *
+ * - A path to a local file, such as `dist/app.tar.gz`. The runner resolves
+ *   relative paths against `GITHUB_WORKSPACE`, not the current working
+ *   directory.
+ * - An OCI subject reference that includes a digest, such as
+ *   `ghcr.io/octocat/app:1.0.0@sha256:<hex>`.
+ *
+ * To force how the runner interprets the value, prefix it with `file://` or
+ * `oci://`. The runner validates each declaration after the step completes and
+ * fails the step if a declaration is invalid.
+ *
+ * Artifact declarations require runner version 2.336.0 or later and take
+ * effect only where they're enabled. On older runners, `GITHUB_ARTIFACTS`
+ * isn't set, so this function logs a debug message and returns without
+ * declaring the artifact. Where artifact declarations aren't enabled, the
+ * runner ignores `GITHUB_ARTIFACTS`, so the declaration has no effect.
+ *
+ * @param artifact path to a local file, or an OCI subject reference with a digest
+ */
+export function declareArtifact(artifact: string): void {
+  const value = artifact.trim()
+
+  // The runner reads one declaration per line and skips blank and comment
+  // lines, so reject values that would be split or silently dropped.
+  if (!value) {
+    throw new Error('Artifact must not be empty')
+  }
+  if (/[\r\n]/.test(value)) {
+    throw new Error(
+      `Artifact must not contain line breaks: ${JSON.stringify(value)}`
+    )
+  }
+  if (value.startsWith('#')) {
+    throw new Error(
+      `Artifact ${JSON.stringify(value)} would be ignored as a comment. To declare a file whose name starts with '#', prefix the path with 'file://'`
+    )
+  }
+
+  if (!process.env['GITHUB_ARTIFACTS']) {
+    debug(
+      `Skipping artifact declaration ${JSON.stringify(value)}: $GITHUB_ARTIFACTS is not set. Artifact declarations require runner version 2.336.0 or later.`
+    )
+    return
+  }
+
+  issueFileCommand('ARTIFACTS', value)
+}
+
+export async function getIDToken(aud?: string): Promise<string> {
+  return await OidcClient.getIDToken(aud)
+}
+
+/**
+ * Summary exports
+ */
+export {summary} from './summary.js'
+
+/**
+ * @deprecated use core.summary
+ */
+export {markdownSummary} from './summary.js'
+
+/**
+ * Path exports
+ */
+export {toPosixPath, toWin32Path, toPlatformPath} from './path-utils.js'
+
+/**
+ * Platform utilities exports
+ */
+export * as platform from './platform.js'

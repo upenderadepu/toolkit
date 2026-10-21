@@ -1,19 +1,18 @@
 import * as core from '@actions/core'
 import * as io from '@actions/io'
+import * as crypto from 'crypto'
 import * as fs from 'fs'
-import * as mm from './manifest'
+import * as mm from './manifest.js'
 import * as os from 'os'
 import * as path from 'path'
 import * as httpm from '@actions/http-client'
 import * as semver from 'semver'
 import * as stream from 'stream'
 import * as util from 'util'
-import uuidV4 from 'uuid/v4'
-import {exec} from '@actions/exec/lib/exec'
-import {ExecOptions} from '@actions/exec/lib/interfaces'
 import {ok} from 'assert'
-import {RetryHelper} from './retry-helper'
-import {IHeaders} from '@actions/http-client/interfaces'
+import {OutgoingHttpHeaders} from 'http'
+import {exec, ExecOptions} from '@actions/exec'
+import {RetryHelper} from './retry-helper.js'
 
 export class HTTPError extends Error {
   constructor(readonly httpStatusCode: number | undefined) {
@@ -32,14 +31,16 @@ const userAgent = 'actions/tool-cache'
  * @param url       url of tool to download
  * @param dest      path to download tool
  * @param auth      authorization header
+ * @param headers   other headers
  * @returns         path to downloaded tool
  */
 export async function downloadTool(
   url: string,
   dest?: string,
-  auth?: string
+  auth?: string,
+  headers?: OutgoingHttpHeaders
 ): Promise<string> {
-  dest = dest || path.join(_getTempDirectory(), uuidV4())
+  dest = dest || path.join(_getTempDirectory(), crypto.randomUUID())
   await io.mkdirP(path.dirname(dest))
   core.debug(`Downloading ${url}`)
   core.debug(`Destination ${dest}`)
@@ -56,7 +57,7 @@ export async function downloadTool(
   const retryHelper = new RetryHelper(maxAttempts, minSeconds, maxSeconds)
   return await retryHelper.execute(
     async () => {
-      return await downloadToolAttempt(url, dest || '', auth)
+      return await downloadToolAttempt(url, dest || '', auth, headers)
     },
     (err: Error) => {
       if (err instanceof HTTPError && err.httpStatusCode) {
@@ -79,7 +80,8 @@ export async function downloadTool(
 async function downloadToolAttempt(
   url: string,
   dest: string,
-  auth?: string
+  auth?: string,
+  headers?: OutgoingHttpHeaders
 ): Promise<string> {
   if (fs.existsSync(dest)) {
     throw new Error(`Destination file path ${dest} already exists`)
@@ -90,12 +92,12 @@ async function downloadToolAttempt(
     allowRetries: false
   })
 
-  let headers: IHeaders | undefined
   if (auth) {
     core.debug('set auth')
-    headers = {
-      authorization: auth
+    if (headers === undefined) {
+      headers = {}
     }
+    headers.authorization = auth
   }
 
   const response: httpm.HttpClientResponse = await http.get(url, headers)
@@ -269,6 +271,7 @@ export async function extractTar(
   if (isGnuTar) {
     // Suppress warnings when using GNU tar to extract archives created by BSD tar
     args.push('--warning=no-unknown-keyword')
+    args.push('--overwrite')
   }
 
   args.push('-C', destArg, '-f', fileArg)
@@ -341,21 +344,55 @@ async function extractZipWin(file: string, dest: string): Promise<void> {
   // build the powershell command
   const escapedFile = file.replace(/'/g, "''").replace(/"|\n|\r/g, '') // double-up single quotes, remove double quotes and newlines
   const escapedDest = dest.replace(/'/g, "''").replace(/"|\n|\r/g, '')
-  const command = `$ErrorActionPreference = 'Stop' ; try { Add-Type -AssemblyName System.IO.Compression.FileSystem } catch { } ; [System.IO.Compression.ZipFile]::ExtractToDirectory('${escapedFile}', '${escapedDest}')`
+  const pwshPath = await io.which('pwsh', false)
 
-  // run powershell
-  const powershellPath = await io.which('powershell', true)
-  const args = [
-    '-NoLogo',
-    '-Sta',
-    '-NoProfile',
-    '-NonInteractive',
-    '-ExecutionPolicy',
-    'Unrestricted',
-    '-Command',
-    command
-  ]
-  await exec(`"${powershellPath}"`, args)
+  //To match the file overwrite behavior on nix systems, we use the overwrite = true flag for ExtractToDirectory
+  //and the -Force flag for Expand-Archive as a fallback
+  if (pwshPath) {
+    //attempt to use pwsh with ExtractToDirectory, if this fails attempt Expand-Archive
+    const pwshCommand = [
+      `$ErrorActionPreference = 'Stop' ;`,
+      `try { Add-Type -AssemblyName System.IO.Compression.ZipFile } catch { } ;`,
+      `try { [System.IO.Compression.ZipFile]::ExtractToDirectory('${escapedFile}', '${escapedDest}', $true) }`,
+      `catch { if (($_.Exception.GetType().FullName -eq 'System.Management.Automation.MethodException') -or ($_.Exception.GetType().FullName -eq 'System.Management.Automation.RuntimeException') ){ Expand-Archive -LiteralPath '${escapedFile}' -DestinationPath '${escapedDest}' -Force } else { throw $_ } } ;`
+    ].join(' ')
+
+    const args = [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Unrestricted',
+      '-Command',
+      pwshCommand
+    ]
+
+    core.debug(`Using pwsh at path: ${pwshPath}`)
+    await exec(`"${pwshPath}"`, args)
+  } else {
+    const powershellCommand = [
+      `$ErrorActionPreference = 'Stop' ;`,
+      `try { Add-Type -AssemblyName System.IO.Compression.FileSystem } catch { } ;`,
+      `if ((Get-Command -Name Expand-Archive -Module Microsoft.PowerShell.Archive -ErrorAction Ignore)) { Expand-Archive -LiteralPath '${escapedFile}' -DestinationPath '${escapedDest}' -Force }`,
+      `else {[System.IO.Compression.ZipFile]::ExtractToDirectory('${escapedFile}', '${escapedDest}', $true) }`
+    ].join(' ')
+
+    const args = [
+      '-NoLogo',
+      '-Sta',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Unrestricted',
+      '-Command',
+      powershellCommand
+    ]
+
+    const powershellPath = await io.which('powershell', true)
+    core.debug(`Using powershell at path: ${powershellPath}`)
+
+    await exec(`"${powershellPath}"`, args)
+  }
 }
 
 async function extractZipNix(file: string, dest: string): Promise<void> {
@@ -364,6 +401,7 @@ async function extractZipNix(file: string, dest: string): Promise<void> {
   if (!core.isDebug()) {
     args.unshift('-q')
   }
+  args.unshift('-o') //overwrite with -o, otherwise a prompt is shown which freezes the run
   await exec(`"${unzipPath}"`, args, {cwd: dest})
 }
 
@@ -469,9 +507,9 @@ export function find(
   arch = arch || os.arch()
 
   // attempt to resolve an explicit version
-  if (!_isExplicitVersion(versionSpec)) {
+  if (!isExplicitVersion(versionSpec)) {
     const localVersions: string[] = findAllVersions(toolName, arch)
-    const match = _evaluateVersions(localVersions, versionSpec)
+    const match = evaluateVersions(localVersions, versionSpec)
     versionSpec = match
   }
 
@@ -511,7 +549,7 @@ export function findAllVersions(toolName: string, arch?: string): string[] {
   if (fs.existsSync(toolPath)) {
     const children: string[] = fs.readdirSync(toolPath)
     for (const child of children) {
-      if (_isExplicitVersion(child)) {
+      if (isExplicitVersion(child)) {
         const fullPath = path.join(toolPath, child, arch || '')
         if (fs.existsSync(fullPath) && fs.existsSync(`${fullPath}.complete`)) {
           versions.push(child)
@@ -557,7 +595,7 @@ export async function getManifestFromRepo(
   const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}`
 
   const http: httpm.HttpClient = new httpm.HttpClient('tool-cache')
-  const headers: IHeaders = {}
+  const headers: OutgoingHttpHeaders = {}
   if (auth) {
     core.debug('set auth')
     headers.authorization = auth
@@ -612,7 +650,7 @@ export async function findFromManifest(
 async function _createExtractFolder(dest?: string): Promise<string> {
   if (!dest) {
     // create a temp dir
-    dest = path.join(_getTempDirectory(), uuidV4())
+    dest = path.join(_getTempDirectory(), crypto.randomUUID())
   }
   await io.mkdirP(dest)
   return dest
@@ -649,7 +687,12 @@ function _completeToolPath(tool: string, version: string, arch?: string): void {
   core.debug('finished caching tool')
 }
 
-function _isExplicitVersion(versionSpec: string): boolean {
+/**
+ * Check if version string is explicit
+ *
+ * @param versionSpec      version string to check
+ */
+export function isExplicitVersion(versionSpec: string): boolean {
   const c = semver.clean(versionSpec) || ''
   core.debug(`isExplicit: ${c}`)
 
@@ -659,7 +702,17 @@ function _isExplicitVersion(versionSpec: string): boolean {
   return valid
 }
 
-function _evaluateVersions(versions: string[], versionSpec: string): string {
+/**
+ * Get the highest satisfiying semantic version in `versions` which satisfies `versionSpec`
+ *
+ * @param versions        array of versions to evaluate
+ * @param versionSpec     semantic version spec to satisfy
+ */
+
+export function evaluateVersions(
+  versions: string[],
+  versionSpec: string
+): string {
   let version = ''
   core.debug(`evaluating ${versions.length} versions`)
   versions = versions.sort((a, b) => {
